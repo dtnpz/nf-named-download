@@ -1,9 +1,12 @@
 // ==UserScript==
 // @name         NF Named Download
 // @namespace    http://tampermonkey.net/
-// @version      2.5
-// @description  Select captured media files and download the chosen file, smallest by default.
+// @updateURL    https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
+// @downloadURL  https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
+// @version      2.6
+// @description  Select media (smallest by default); use active NF title, audio language and codec for filenames.
 // @match        *://*/*
+// @grant        unsafeWindow
 // @grant        GM_setClipboard
 // @grant        GM_download
 // @grant        GM_xmlhttpRequest
@@ -64,7 +67,7 @@
         if (!panel) return;
         panelBody.hidden = minimized;
         panel.style.width = minimized ? '240px' : '430px';
-        panelHeading.textContent = minimized ? 'NFLX' : 'NFLX · Smallest file';
+        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader';
         minimizeButton.textContent = minimized ? '+' : '−';
         minimizeButton.title = minimized ? 'Restore downloader' : 'Minimize downloader';
         minimizeButton.setAttribute('aria-label', minimizeButton.title);
@@ -211,14 +214,104 @@
             .replace(/\s+/g, ' ').replace(/[. ]+$/g, '').trim().slice(0, 180);
     }
 
+
+    // Only inspect the currently active player. Never invoke a license or
+    // playback mutation; a captured CDN URL is not necessarily an audio track.
+    function activePlayer() {
+        try {
+            const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const api = page.netflix?.appContext?.state?.playerApp?.getAPI?.();
+            const video = api?.videoPlayer;
+            const sessions = Array.from(video?.getAllPlayerSessionIds?.() || []);
+            const id = sessions.filter(x => typeof x === 'string').find(x => /watch/i.test(x))
+                || sessions.find(x => typeof x === 'string');
+            return id ? {player: video.getVideoPlayerBySessionId?.(id) || null, api} : null;
+        } catch (_) { return null; }
+    }
+
+    function audioLanguage(raw) {
+        if (typeof raw !== 'string') return null;
+        const value = raw.trim();
+        if (!value) return null;
+        if (/^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})*$/i.test(value)) {
+            return value.replace(/_/g, '-').toLowerCase();
+        }
+        const names = [
+            [/^(?:english|อังกฤษ)/i, 'en'], [/^(?:japanese|日本語|ญี่ปุ่น)/i, 'ja'],
+            [/^(?:thai|ไทย)/i, 'th'], [/^(?:korean|한국어|เกาหลี)/i, 'ko'],
+            [/^(?:mandarin|chinese|中文|จีน)/i, 'zh'], [/^(?:cantonese|廣東話|粤语)/i, 'yue'],
+            [/^(?:spanish|español)/i, 'es'], [/^(?:french|français)/i, 'fr'],
+            [/^(?:german|deutsch)/i, 'de'], [/^(?:portuguese|português)/i, 'pt'],
+            [/^(?:indonesian|bahasa indonesia)/i, 'id'], [/^(?:vietnamese|tiếng việt)/i, 'vi'],
+            [/^(?:italian|italiano)/i, 'it'], [/^(?:hindi|हिन्दी)/i, 'hi']
+        ];
+        return names.find(([regex]) => regex.test(value))?.[1] || null;
+    }
+
+    function selectedAudioInfo() {
+        let track = null;
+        let selectedLabel = '';
+        try {
+            const player = activePlayer()?.player;
+            track = player?.getAudioTrack?.() || player?.getCurrentAudioTrack?.() || null;
+            const tracks = player?.getAudioTrackList?.() || player?.getAudioTracks?.();
+            if ((!track || typeof track === 'string') && Array.isArray(tracks)) {
+                const byId = tracks.find(t => t && (t.id === track || t.trackId === track));
+                track = byId || tracks.find(t => t?.selected || t?.isSelected || t?.active) || null;
+            }
+        } catch (_) {}
+        try {
+            // Do not confuse currently selected SUBTITLE with the audio track.
+            selectedLabel = document.querySelector([
+                '.audio-tracks [aria-checked="true"]',
+                '.audio-tracks [aria-selected="true"]',
+                '.audio-tracks .selected',
+                '[data-uia="audio-item"][aria-checked="true"]',
+                '[data-uia="audio-item"][aria-selected="true"]',
+                '[data-uia="audio-item"].selected'
+            ].join(','))?.textContent?.trim() || '';
+        } catch (_) {}
+        const langFields = [track?.language?.bcp47, track?.language?.code,
+            track?.languageCode, track?.bcp47, track?.language,
+            track?.lang, track?.locale, track?.displayName, track?.languageDescription,
+            selectedLabel];
+        const lang = langFields.map(audioLanguage).find(Boolean) || 'und';
+        const labels = [
+            track?.codec, track?.audioCodec, track?.contentProfile,
+            track?.profile, track?.format, track?.mimeType,
+            track?.audioFormat, track?.displayName, selectedLabel
+        ].filter(x => typeof x === 'string').join(' ');
+        // 5.1 channels alone do not mean DD+: HE-AAC 5.1 exists on NF.
+        const ddp = /(?:\bec-?3\b|\be-?ac-?3\b|ddplus|dolby digital plus)/i.test(labels);
+        return {lang, codec: ddp ? 'eac3' : 'aac', codecVerified: ddp ||
+            /(?:\bmp4a\b|\bheaac\b|\baac\b)/i.test(labels)};
+    }
+
+    function activeVideoMetadata() {
+        try {
+            const active = activePlayer();
+            const id = active?.player?.getMovieId?.();
+            return id ? active.api?.getVideoMetadataByVideoId?.(id)?.getCurrentVideo?.() || null : null;
+        } catch (_) { return null; }
+    }
+
+    function suggestedAudioFilename() {
+        const number = selectedLink()?.[1].number || 1;
+        const audio = selectedAudioInfo();
+        return safeName(titleAndEpisode() + ' - ' + audio.lang + ' - ' + audio.codec +
+            ' - track-' + String(number).padStart(2, '0')) + '.' + audio.codec;
+    }
+
     function titleAndEpisode() {
         const root = document.querySelector('[data-uia="video-title"], .video-title');
         const labels = root ? [...new Set(Array.from(root.querySelectorAll('span'))
             .map(el => el.textContent.trim()).filter(Boolean))] : [];
         const playerText = labels.join(' ');
         const media = navigator.mediaSession?.metadata;
+        const meta = activeVideoMetadata();
         let title = root?.querySelector('h4, h3, h2')?.textContent?.trim()
-            || text('.watch-video--title') || media?.album || media?.title
+            || text('.watch-video--title') || meta?.getTitle?.()
+            || media?.album || media?.title
             || document.title.replace(/\s*[-|–]\s*Netflix\s*$/i, '').trim();
         if (!title || /^netflix$/i.test(title)) {
             title = 'NF - ' + (location.pathname.match(/\/watch\/(\d+)/)?.[1] || 'media');
@@ -228,12 +321,15 @@
         const match = playerText.match(/S\s*(\d+)\s*[: .-]*E\s*(\d+)/i)
             || playerText.match(/Season\s*(\d+)\s*[:,.-]?\s*Episode\s*(\d+)/i)
             || playerText.match(/(?:ซีซั่น|ฤดูกาล)\s*(\d+)\s*[:,.-]?\s*ตอน(?:ที่)?\s*(\d+)/);
-        const season = match?.[1]
-            || playerText.match(/(?:Season|ซีซั่น|ฤดูกาล)\s*(\d+)/i)?.[1];
-        const episode = match?.[2]
-            || playerText.match(/(?:Episode|ตอน(?:ที่)?|\bE)\s*(\d+)/i)?.[1];
-        const code = (season ? `S${season.padStart(2, '0')}` : '')
-            + (episode ? `E${episode.padStart(2, '0')}` : '');
+        const rawSeason = match?.[1]
+            || playerText.match(/(?:Season|ซีซั่น|ฤดูกาล)\s*(\d+)/i)?.[1]
+            || meta?.getSeasonNumber?.();
+        const rawEpisode = match?.[2]
+            || playerText.match(/(?:Episode|ตอน(?:ที่)?|\bE)\s*(\d+)/i)?.[1]
+            || meta?.getEpisodeNumber?.();
+        const season = /^\d+$/.test(String(rawSeason ?? '')) ? String(rawSeason).padStart(2, '0') : '';
+        const episode = /^\d+$/.test(String(rawEpisode ?? '')) ? String(rawEpisode).padStart(2, '0') : '';
+        const code = (season ? 'S' + season : '') + (episode ? 'E' + episode : '');
         const episodeTitles = labels.filter(label => !title.includes(label)
             && !/^(?:S\s*\d+\s*[: .-]*E\s*\d+|(?:Season|ซีซั่น|ฤดูกาล)\s*\d+|(?:Episode|ตอน(?:ที่)?|E)\s*\d+)$/i.test(label)
             && label !== match?.[0]);
@@ -242,8 +338,7 @@
 
     function suggestFilename() {
         if (!filename || edited) return;
-        const number = selectedLink()?.[1].number || 1;
-        filename.value = `${titleAndEpisode()} - track-${String(number).padStart(2, '0')}.mp4`;
+        filename.value = suggestedAudioFilename();
     }
 
     function resetOnNavigation() {
@@ -419,7 +514,10 @@
             const url = selected[0];
             let name = safeName(filename.value);
             if (!name) { status.textContent = 'Enter a filename first.'; return; }
-            if (!/\.[a-z0-9]{1,8}$/i.test(name)) name += '.mp4';
+            // Audio suffix only, never .mp4. This changes the filename, not
+            // the media container, codec, encryption or DRM state.
+            const ext = selectedAudioInfo().codec;
+            name = safeName(name.replace(/\.(?:mp4|m4a|aac|eac3)$/i, '')) + '.' + ext;
             status.textContent = 'Starting download…';
             downloading = true;
             updateSummary();
@@ -438,7 +536,7 @@
 
         status = document.createElement('div');
         status.style.marginTop = '10px';
-        status.textContent = 'Select a file to download (smallest by default). Filename is editable.';
+        status.textContent = 'Current audio language + codec in filename; CDN data is saved unchanged.';
         content.appendChild(status);
         parent.appendChild(panel);
         refreshChoices();

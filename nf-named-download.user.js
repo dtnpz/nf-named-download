@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @updateURL    https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 // @downloadURL  https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
-// @version      2.6
+// @version      2.7
 // @description  Select media (smallest by default); use active NF title, audio language and codec for filenames.
 // @match        *://*/*
 // @grant        unsafeWindow
@@ -35,6 +35,11 @@
     let generation = 0;
     let resourceStartTime = 0;
     let downloading = false;
+    let downloadStartMs = 0;
+    let downloadProgressMs = 0;
+    let downloadHandle = null;
+    let downloadNoticeTimer = null;
+    let audioSummary = null;
     // Null means automatic smallest; a manual selection stays pinned while new links arrive.
     let manualChoiceUrl = null;
     let pageKey = location.origin + location.pathname;
@@ -67,7 +72,7 @@
         if (!panel) return;
         panelBody.hidden = minimized;
         panel.style.width = minimized ? '240px' : '430px';
-        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader';
+        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v2.7';
         minimizeButton.textContent = minimized ? '+' : '−';
         minimizeButton.title = minimized ? 'Restore downloader' : 'Minimize downloader';
         minimizeButton.setAttribute('aria-label', minimizeButton.title);
@@ -248,6 +253,50 @@
         return names.find(([regex]) => regex.test(value))?.[1] || null;
     }
 
+
+    // Read-only selected audio codec when player/debug overlay provides it.
+    // Never request keys, change tracks, or force the native diagnostic panel.
+    function parsePlaybackAudio(value) {
+        if (value == null) return null;
+        let data = value;
+        if (typeof data === 'object') {
+            const item = data.audioTrack || data.audio_track || data.audio;
+            if (typeof item === 'string') data = item;
+            else if (item && typeof item === 'object') {
+                const lang = audioLanguage(item.languageCode || item.language || item.lang);
+                const codec = String(item.codec || item.audioCodec || item.mimeType || '');
+                return codec ? {lang, codec, source:'player-stats'} : null;
+            } else data = String(data.audioCodec || data.audio_codec || '');
+        }
+        if (typeof data !== 'string' || !data) return null;
+        const match = data.match(/(?:^|\n)\s*Audio Track\s*:\s*([^\r\n]+)/i);
+        const line = (match ? match[1] : data).trim();
+        if (!match && /Video Track/i.test(data)) return null;
+        const codec = line.match(/\bCodec\s*:\s*([^,\r\n]+?)(?=\s*Video Track:|$)/i)?.[1]
+            || line.match(/\b(?:ec-3|eac3|mp4a\.\d+(?:\.\d+)?|ddplus|heaac|aac)\b/i)?.[0]
+            || '';
+        const lang = audioLanguage(line.match(/^([a-z]{2,3}(?:-[a-z0-9]+)*)\s*,/i)?.[1] || '');
+        return codec ? {lang, codec, source:'playback-stats'} : null;
+    }
+
+    function currentPlaybackAudio() {
+        try {
+            const player = activePlayer()?.player;
+            const stats = player?.getPlaybackStats?.() || player?.getPlaybackStatistics?.();
+            const result = parsePlaybackAudio(stats);
+            if (result) return result;
+        } catch (_) {}
+        try {
+            for (const el of document.querySelectorAll('textarea[readonly]')) {
+                if (/Audio Track:\s*/i.test(el.value || '')) {
+                    const result = parsePlaybackAudio(el.value);
+                    if (result) return result;
+                }
+            }
+        } catch (_) {}
+        return null;
+    }
+
     function selectedAudioInfo() {
         let track = null;
         let selectedLabel = '';
@@ -275,16 +324,22 @@
             track?.languageCode, track?.bcp47, track?.language,
             track?.lang, track?.locale, track?.displayName, track?.languageDescription,
             selectedLabel];
-        const lang = langFields.map(audioLanguage).find(Boolean) || 'und';
+        const playback = currentPlaybackAudio();
+        const lang = playback?.lang || langFields.map(audioLanguage).find(Boolean) || 'und';
         const labels = [
             track?.codec, track?.audioCodec, track?.contentProfile,
             track?.profile, track?.format, track?.mimeType,
             track?.audioFormat, track?.displayName, selectedLabel
         ].filter(x => typeof x === 'string').join(' ');
-        // 5.1 channels alone do not mean DD+: HE-AAC 5.1 exists on NF.
-        const ddp = /(?:\bec-?3\b|\be-?ac-?3\b|ddplus|dolby digital plus)/i.test(labels);
-        return {lang, codec: ddp ? 'eac3' : 'aac', codecVerified: ddp ||
-            /(?:\bmp4a\b|\bheaac\b|\baac\b)/i.test(labels)};
+        // The *playing* audio codec takes precedence over track labels because
+        // a 5.1 menu entry may actually be HE-AAC 5.1, not Dolby Digital Plus.
+        const mediaCodecs = typeof playback?.codec === 'string' && playback.codec
+            ? playback.codec : labels;
+        const ddp = /(?:\bec-?3\b|\be-?ac-?3\b|ddplus|dolby digital plus)/i.test(mediaCodecs);
+        const aac = /(?:\bmp4a\b|\bheaac\b|\baac\b)/i.test(mediaCodecs);
+        return {lang, codec: ddp ? 'eac3' : 'aac',
+            codecVerified: ddp || aac,
+            source: playback?.source || (track ? 'active-track' : selectedLabel ? 'audio-selector' : 'unknown')};
     }
 
     function activeVideoMetadata() {
@@ -337,8 +392,19 @@
     }
 
     function suggestFilename() {
-        if (!filename || edited) return;
-        filename.value = suggestedAudioFilename();
+        if (!filename) return;
+        if (!edited) filename.value = suggestedAudioFilename();
+        else {
+            // Preserve the edited name, but normalize any obsolete extension.
+            const ext = selectedAudioInfo().codec;
+            filename.value = safeName(filename.value.replace(/\.(?:mp4|m4a|aac|eac3)$/i, '')) + '.' + ext;
+        }
+        if (audioSummary) {
+            const info = selectedAudioInfo();
+            audioSummary.textContent = 'Audio: ' + info.lang + ' · ' + info.codec.toUpperCase() +
+                (info.codecVerified ? ' (identified)' : ' (codec unverified)') +
+                ' · file may be a container/DRM media';
+        }
     }
 
     function resetOnNavigation() {
@@ -354,6 +420,7 @@
         manualChoiceUrl = null;
         if (panel) panel.remove();
         panel = choices = filename = status = summary = downloadButton = undefined;
+        audioSummary = null;
         panelBody = panelHeading = minimizeButton = undefined;
         edited = false;
         closed = false;
@@ -372,6 +439,7 @@
         // NF may detach overlays when replacing the video player.
         if (panel && !panel.isConnected) {
             panel = choices = filename = status = summary = downloadButton = undefined;
+            audioSummary = null;
             panelBody = panelHeading = minimizeButton = undefined;
         }
         const parent = panelParent();
@@ -424,7 +492,7 @@
         header.title = 'Drag this header to move the downloader';
         const heading = document.createElement('strong');
         panelHeading = heading;
-        heading.textContent = 'NF · Media downloader';
+        heading.textContent = 'NF · Media downloader v2.7';
         header.appendChild(heading);
         const headerActions = document.createElement('div');
         headerActions.className = 'header-actions';
@@ -472,7 +540,12 @@
         filename.type = 'text';
         filename.setAttribute('aria-label', 'Download filename');
         filename.oninput = () => { edited = true; };
+        filename.onblur = suggestFilename;
         content.appendChild(filename);
+        audioSummary = document.createElement('div');
+        audioSummary.className = 'destination';
+        audioSummary.setAttribute('aria-live','polite');
+        content.appendChild(audioSummary);
 
         const destination = document.createElement('div');
         destination.className = 'destination';
@@ -501,42 +574,84 @@
         download.onclick = () => {
             const selected = selectedLink();
             if (!selected || downloading) {
-                if (!selected) status.textContent = "No measured file is ready yet.";
+                if (!selected) status.textContent = 'Wait for a measured file.';
                 return;
             }
-            // Let GM_download report permission/mode errors instead of silently
-            // rejecting clicks when Tampermonkey does not expose downloadMode.
-            // Browser API is still recommended for the relative nfaudio folder.
             const mode = typeof GM_info === 'object' ? GM_info?.downloadMode : undefined;
             if (mode && mode !== 'browser') {
-                status.textContent = 'Tampermonkey Download Mode is not Browser API. Attempting download; folder may differ.';
+                status.textContent = 'Tampermonkey Download Mode is ' + mode +
+                    '; use Browser API to preserve the desired name/folder.';
             }
             const url = selected[0];
+            suggestFilename();
             let name = safeName(filename.value);
             if (!name) { status.textContent = 'Enter a filename first.'; return; }
-            // Audio suffix only, never .mp4. This changes the filename, not
-            // the media container, codec, encryption or DRM state.
             const ext = selectedAudioInfo().codec;
             name = safeName(name.replace(/\.(?:mp4|m4a|aac|eac3)$/i, '')) + '.' + ext;
-            status.textContent = 'Starting download…';
+            filename.value = name;
+            status.textContent = 'Preparing browser download…';
             downloading = true;
+            downloadStartMs = Date.now();
+            downloadProgressMs = 0;
             updateSummary();
-            const downloadStatus = status;
-            const finish = message => { downloadStatus.textContent = message; downloading = false; updateSummary(); };
+            const node = status;
+            let finished = false;
+            const finish = message => {
+                if (finished) return;
+                finished = true;
+                if (downloadNoticeTimer) clearInterval(downloadNoticeTimer);
+                downloadNoticeTimer = null;
+                downloadHandle = null;
+                node.textContent = message;
+                downloading = false;
+                updateSummary();
+            };
+            // Browser preferences and extension permissions can still prompt
+            // even with saveAs:false. Report the wait instead of hanging silently.
+            downloadNoticeTimer = setInterval(() => {
+                if (finished) return;
+                if (Date.now() - (downloadProgressMs || downloadStartMs) > 10000) {
+                    node.textContent = 'Waiting for download or Save As confirmation. Check Downloads; ' +
+                        'turn off "Ask where to save each file" in browser Settings.';
+                }
+            }, 3000);
             try {
-                GM_download({
-                    url, name: `${DOWNLOAD_FOLDER}/${name}`, saveAs: false, conflictAction: 'uniquify',
-                    onload: () => finish('Download complete → nfaudio.'),
-                    onerror: error => finish(`Download failed: ${error?.error || 'unknown error'}. Check Tampermonkey download settings; replay to refresh expired links.`),
-                    ontimeout: () => finish('Download timed out. Try again.')
+                downloadHandle = GM_download({
+                    url, name: DOWNLOAD_FOLDER + '/' + name,
+                    saveAs: false, conflictAction: 'uniquify',
+                    onprogress: event => {
+                        if (finished) return;
+                        downloadProgressMs = Date.now();
+                        const got = Number(event?.loaded);
+                        const total = Number(event?.total) || selected[1].bytes;
+                        if (Number.isFinite(got) && got >= 0) {
+                            const pct = Number.isFinite(total) && total > 0
+                                ? Math.min(100, 100 * got / total).toFixed(1) + '%' : '?';
+                            node.textContent = 'Downloading ' + pct + ' · ' +
+                                formatSize(got) + (total > 0 ? ' / ' + formatSize(total) : '');
+                        } else node.textContent = 'Downloading…';
+                    },
+                    onload: () => finish('Download finished. Check the NF audio folder.'),
+                    onerror: error => {
+                        const reason = error?.error || 'unknown';
+                        const advice = reason === 'not_whitelisted'
+                            ? ' Allow .aac/.eac3 extensions in Tampermonkey settings.'
+                            : reason === 'not_permitted' || reason === 'not_enabled'
+                                ? ' Enable download permission for Tampermonkey.'
+                                : ' Check Downloads, signed URL expiry and permissions.';
+                        finish('Download failed: ' + reason + '.' + advice);
+                    },
+                    ontimeout: () => finish('Download timed out; resume playback and retry with a fresh link.')
                 });
-            } catch (error) { finish(`Download failed: ${error.message}`); }
+            } catch (error) {
+                finish('Download failed: ' + (error?.message || String(error)));
+            }
         };
         content.appendChild(download);
 
         status = document.createElement('div');
         status.style.marginTop = '10px';
-        status.textContent = 'Current audio language + codec in filename; CDN data is saved unchanged.';
+        status.textContent = 'Selected file · smallest by default · original CDN bytes unchanged.';
         content.appendChild(status);
         parent.appendChild(panel);
         refreshChoices();

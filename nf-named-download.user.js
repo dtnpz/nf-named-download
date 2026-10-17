@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @updateURL    https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 // @downloadURL  https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
-// @version      3
+// @version      3.1
 // @description  Select media (smallest by default); use active NF title, audio language and codec for filenames.
 // @match        *://*/*
 // @grant        unsafeWindow
@@ -21,6 +21,22 @@
 
 (function () {
     'use strict';
+
+    // Duplicate Tampermonkey copies run in isolated JS contexts but share the
+    // page DOM. Claim it once; a second current-version copy exits immediately.
+    // Browser reload creates a fresh document and resets this marker.
+    const singletonRoot = document.documentElement;
+    if (singletonRoot?.hasAttribute('data-nf-named-download-active')) return;
+    if (singletonRoot) singletonRoot.setAttribute('data-nf-named-download-active', '3.1');
+
+    // Older differently-named NF download scripts do not implement the
+    // singleton. Hide their duplicate overlays (not their other functionality)
+    // so the user only sees one downloader while removing old userscripts.
+    if (location.hostname === 'www.netflix.com' || /[.]netflix[.]com$/i.test(location.hostname)) {
+        const legacyStyle = document.createElement('style');
+        legacyStyle.textContent = '#nflxLinkBox, #nfLinkBox:not([data-nf-downloader-owner="3.1"]) { display:none!important; }';
+        (document.head || document.documentElement)?.appendChild(legacyStyle);
+    }
 
     // Relative to the browser's download folder. Locally, gm/nfaudio points to
     // /datadisk/daily/gm/nfaudio so other browser downloads are unaffected.
@@ -47,6 +63,7 @@
     let pageKey = location.origin + location.pathname;
     let panel, choices, filename, status, summary, downloadButton;
     let panelBody, panelHeading, minimizeButton;
+    let warnedLegacyPanel = false;
     let closed = false;
     let edited = false;
     let savedUI = {};
@@ -74,7 +91,7 @@
         if (!panel) return;
         panelBody.hidden = minimized;
         panel.style.width = minimized ? '240px' : '430px';
-        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v3';
+        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v3.1';
         minimizeButton.textContent = minimized ? '+' : '−';
         minimizeButton.title = minimized ? 'Restore downloader' : 'Minimize downloader';
         minimizeButton.setAttribute('aria-label', minimizeButton.title);
@@ -578,7 +595,24 @@
         return document.body;
     }
 
+    function duplicatePanelCount() {
+        try {
+            return [...document.querySelectorAll('#nfLinkBox, #nflxLinkBox')]
+                .filter(node => node !== panel).length;
+        } catch (_) { return 0; }
+    }
+
+    function warnIfDuplicatePanels() {
+        const count = duplicatePanelCount();
+        if (!count || warnedLegacyPanel) return;
+        warnedLegacyPanel = true;
+        console.warn('[NF downloader] Another NF downloader overlay was detected (' +
+            count + '). Disable older NF / NFLX userscripts in Tampermonkey to ' +
+            'prevent duplicate windows, duplicate requests and download conflicts.');
+    }
+
     function showPanel() {
+        warnIfDuplicatePanels();
         // NF may detach overlays when replacing the video player.
         if (panel && !panel.isConnected) {
             panel = choices = filename = status = summary = downloadButton = undefined;
@@ -590,6 +624,7 @@
         if (panel || closed || (!seen.size && !isNFPage) || !parent) return;
         panel = document.createElement('div');
         panel.id = 'nfLinkBox';
+        panel.dataset.nfDownloaderOwner = '3.1';
         Object.assign(panel.style, {
             all: 'initial', position: 'fixed', bottom: '24px', right: '24px', width: '430px',
             maxWidth: 'calc(100vw - 16px)', maxHeight: 'calc(100vh - 16px)',
@@ -635,7 +670,7 @@
         header.title = 'Drag this header to move the downloader';
         const heading = document.createElement('strong');
         panelHeading = heading;
-        heading.textContent = 'NF · Media downloader v3';
+        heading.textContent = 'NF · Media downloader v3.1';
         header.appendChild(heading);
         const headerActions = document.createElement('div');
         headerActions.className = 'header-actions';
@@ -722,8 +757,9 @@
             }
             const mode = typeof GM_info === 'object' ? GM_info?.downloadMode : undefined;
             if (mode && mode !== 'browser') {
-                status.textContent = 'Tampermonkey Download Mode is ' + mode +
-                    '; use Browser API to preserve the desired name/folder.';
+                status.textContent = 'Tampermonkey Download Mode = ' + mode +
+                    '. Silent saveAs:false requires Browser API. Set it under Tampermonkey → Settings → Downloads before trying again.';
+                return;
             }
             const url = selected[0];
             suggestFilename();
@@ -794,7 +830,9 @@
 
         status = document.createElement('div');
         status.style.marginTop = '10px';
-        status.textContent = 'Selected file · smallest by default · original CDN bytes unchanged.';
+        status.textContent = duplicatePanelCount()
+            ? 'Duplicate NF downloader script detected. Older overlay is hidden; disable older NF / NFLX scripts in Tampermonkey.'
+            : 'Selected file · smallest by default · original CDN bytes unchanged.';
         content.appendChild(status);
         parent.appendChild(panel);
         refreshChoices();
@@ -904,6 +942,21 @@
     setInterval(() => { resetOnNavigation(); showPanel(); suggestFilename(); }, 1000);
     document.addEventListener('fullscreenchange', () => { showPanel(); fitPanel(); });
     window.addEventListener('resize', () => { fitPanel(); savePanelState(); });
+    GM_registerMenuCommand('Diagnose NF downloader duplicates / download mode', () => {
+        const count = duplicatePanelCount();
+        const mode = typeof GM_info === 'object' ? GM_info?.downloadMode : undefined;
+        const details = 'NF downloader 3.1: ' + count +
+            ' other visible downloader panel(s).\\n' +
+            'Tampermonkey Download Mode: ' + (mode || 'not exposed to userscript') +
+            '.\\nGM_download saveAs:false is used. Silent downloads require ' +
+            'Tampermonkey Download Mode = Browser API, Downloads permission, ' +
+            'allowed file extension, and a browser directory that accepts the ' +
+            'relative path gm/nfaudio. Chrome extensions cannot use absolute paths.';
+        console.info('[NF downloader] Routing diagnostics:', {duplicatePanels:count,
+            tampermonkeyMode:mode || 'unknown', relativePath:DOWNLOAD_FOLDER});
+        if (status) status.textContent = details.replaceAll('\\n', ' ');
+        else window.alert(details);
+    });
     GM_registerMenuCommand('Show NF downloader', () => {
         closed = false;
         if (panel) { panel.style.display = 'block'; fitPanel(); }

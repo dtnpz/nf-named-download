@@ -1,32 +1,35 @@
-# NF Named Download v2.7
+# NF Named Download — v2.9
 
-Tampermonkey helper with a selection-aware downloader. The interface uses the name NF; website hostnames and runtime API keys are preserved so the script remains functional.
+The requested audio filename now follows the confirmed selected 5.1 track even when the audio menu is closed or the player exposes channels without a codec field.
 
 ## Changes
 
-- Panel title shows "NF · Media downloader v2.7" so the installed version is visible.
-- Dropdown defaults to the smallest measured file; Copy Link and Download use the selected file.
-- Filename follows the current title, episode, and selected audio track language. When the actual playing codec is identified as EC-3/DD+, uses .eac3; for HE-AAC/AAC and unknown codec, uses .aac.
-- Example: Show Title - S01E02 - zh-cn - eac3 - track-01.eac3 (only when EC-3 identified), or Show Title - S01E02 - zh-cn - aac - track-01.aac (AAC/HE-AAC or unverified).
-- Selected audio is read from the player and, when available, playback stats or the currently open read-only diagnostic textarea. Real playback codec takes precedence over audio selection labels. A 5.1 label DOES NOT prove EC-3.
-- The panel shows whether audio codec data is confirmed. Old .mp4/.m4a extensions are normalized. Filename editing retains the basename.
-- Download now reports progress and more useful errors. If nothing starts after 10 seconds, it tells you to check the browser's download/Save As dialog.
-- Captured CDN responses are copied unchanged. Renaming cannot transcode, demux or decrypt a file; a large measured file is not necessarily a valid audio-only file.
+- Read the current player's `channels`, `channelCount`, `numChannels`, `audioChannels`, channel layout, and selected track label.
+- Resolve selected audio IDs, including numeric IDs, against the player's audio-track list.
+- A selected 5.1 track produces the requested `eac3` token and `.eac3` extension. A checked stereo menu selection produces `aac` / `.aac`.
+- Audio-menu detection stays scoped to the audio column and supports additional audio-row markup. A checked subtitle cannot determine audio naming.
+- Clear cached menu information when the active audio ID, language, or channel count changes. Ignore playback stats from a different audio language.
+- Show `5.1 selected` instead of the previous `assumed` / `codec unverified` wording. Independently reported playback codec remains available as a separate diagnostic when it differs from the requested output label.
+- Preserve manual filenames, selected CDN links, size comparisons, download feedback, minimize/drag, and the `gm/nfaudio` destination.
 
-## Suppress the Save As location picker
+Example:
 
-The code uses GM_download with saveAs:false, but browser settings and Tampermonkey extension permission may still require a dialog; a userscript cannot reliably override that.
-
-1. Open thorium://settings/downloads and turn OFF "Ask where to save each file before downloading".
-2. In Tampermonkey Settings > Download Mode, choose Browser API and give Downloads permission.
-3. Allow .aac and .eac3 in Tampermonkey's file extension whitelist, if one is enforced. Failure reason not_whitelisted means the extension must be allowed.
-4. Relative destination gm/nfaudio resolves under the browser's download directory. The inspected Thorium profile currently lists /home/deraz/Downloads and Downloads/gm/nfaudio is a symlink. The script's text showing a destination cannot override browser settings.
-5. Disable any older duplicate NF userscript and reload the watch page. Confirm title says v2.7.
+```text
+Title - S01E01 - zh-cn - eac3 - track-02.eac3
+```
 
 ## Install
 
+Update the existing Tampermonkey script using:
+
 https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 
-## Validation
+Reload the watch page and check that the panel displays **NF · Media downloader v2.9**.
 
-JavaScript syntax and regression tests passed for title/episode, selected audio language, codec EC-3 vs HE-AAC 5.1, unknown-codec fallback, selected-link download, forced audio extension and download callback flow. No real browser/CDN transfer or Save As prompt was exercised by the test harness.
+## Verification and scope
+
+Run `node --check nf-named-download.user.js` and `node test_nf_named_download_v2_9.js`.
+
+Focused regression coverage includes selected 5.1 with no codec/menu, alternate channel fields, numeric selected-track IDs, audio changes with a closed menu, subtitle isolation, editable filenames, selected downloads while other probes run, and separate playback-codec diagnostics.
+
+This change corrects selection detection and the requested filename convention. Downloaded CDN bytes are unchanged. It does not establish that every selected response is elementary E-AC-3, nor does it add demuxing, decryption, or transcoding.

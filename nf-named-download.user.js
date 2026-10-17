@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @updateURL    https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 // @downloadURL  https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
-// @version      2.7
+// @version      2.9
 // @description  Select media (smallest by default); use active NF title, audio language and codec for filenames.
 // @match        *://*/*
 // @grant        unsafeWindow
@@ -40,6 +40,8 @@
     let downloadHandle = null;
     let downloadNoticeTimer = null;
     let audioSummary = null;
+    let lastCheckedAudioChoice = null;
+    let lastAudioTrackKey = null;
     // Null means automatic smallest; a manual selection stays pinned while new links arrive.
     let manualChoiceUrl = null;
     let pageKey = location.origin + location.pathname;
@@ -72,7 +74,7 @@
         if (!panel) return;
         panelBody.hidden = minimized;
         panel.style.width = minimized ? '240px' : '430px';
-        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v2.7';
+        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v2.9';
         minimizeButton.textContent = minimized ? '+' : '−';
         minimizeButton.title = minimized ? 'Restore downloader' : 'Minimize downloader';
         minimizeButton.setAttribute('aria-label', minimizeButton.title);
@@ -244,7 +246,8 @@
         const names = [
             [/^(?:english|อังกฤษ)/i, 'en'], [/^(?:japanese|日本語|ญี่ปุ่น)/i, 'ja'],
             [/^(?:thai|ไทย)/i, 'th'], [/^(?:korean|한국어|เกาหลี)/i, 'ko'],
-            [/^(?:mandarin|chinese|中文|จีน)/i, 'zh'], [/^(?:cantonese|廣東話|粤语)/i, 'yue'],
+            [/^(?:mandarin|จีนกลาง|普通话|國語|国语)/i, 'zh-cn'],
+            [/^(?:chinese|中文|จีน)/i, 'zh'], [/^(?:cantonese|廣東話|粤语)/i, 'yue'],
             [/^(?:spanish|español)/i, 'es'], [/^(?:french|français)/i, 'fr'],
             [/^(?:german|deutsch)/i, 'de'], [/^(?:portuguese|português)/i, 'pt'],
             [/^(?:indonesian|bahasa indonesia)/i, 'id'], [/^(?:vietnamese|tiếng việt)/i, 'vi'],
@@ -253,6 +256,45 @@
         return names.find(([regex]) => regex.test(value))?.[1] || null;
     }
 
+
+    function audioChannels(value) {
+        if (value && typeof value === 'object') {
+            return audioChannels(value.channelCount ?? value.count ?? value.layout);
+        }
+        const label = String(value ?? '').trim();
+        if (/(?:^|[^\d])5[.,]1(?:[^\d]|$)/.test(label)) return 6;
+        if (/(?:^|[^\d])7[.,]1(?:[^\d]|$)/.test(label)) return 8;
+        if (/^(?:2(?:[.,]0)?|stereo)$/i.test(label)) return 2;
+        if (/^(?:1(?:[.,]0)?|mono)$/i.test(label)) return 1;
+        if (/^[1-8](?:\s*channels?)?$/i.test(label)) return parseInt(label, 10);
+        return null;
+    }
+
+    function currentAudioSelection() {
+        let track = null;
+        try {
+            const player = activePlayer()?.player;
+            track = player?.getAudioTrack?.() ?? player?.getCurrentAudioTrack?.() ?? null;
+            const list = player?.getAudioTrackList?.() || player?.getAudioTracks?.();
+            const tracks = Array.isArray(list) ? list : list?.tracks;
+            if ((!track || typeof track !== 'object') && Array.isArray(tracks)) {
+                const id = track;
+                track = tracks.find(t => t && id != null && String(t.id ?? t.trackId) === String(id))
+                    || tracks.find(t => t?.selected || t?.isSelected || t?.active) || null;
+            }
+        } catch (_) {}
+        if (!track || typeof track !== 'object') track = null;
+        const lang = [track?.language?.bcp47, track?.language?.code, track?.languageCode,
+            track?.bcp47, track?.language, track?.lang, track?.locale,
+            track?.displayName, track?.languageDescription].map(audioLanguage).find(Boolean) || null;
+        const channels = [track?.channels, track?.channelCount, track?.numChannels,
+            track?.audioChannels, track?.channelLayout, track?.displayName,
+            track?.languageDescription].map(audioChannels).find(value => value != null) ?? null;
+        const key = track ? JSON.stringify([track.id ?? track.trackId ?? null, lang, channels]) : null;
+        if (key && lastAudioTrackKey && key !== lastAudioTrackKey) lastCheckedAudioChoice = null;
+        if (key) lastAudioTrackKey = key;
+        return {track, lang, channels};
+    }
 
     // Read-only selected audio codec when player/debug overlay provides it.
     // Never request keys, change tracks, or force the native diagnostic panel.
@@ -265,7 +307,8 @@
             else if (item && typeof item === 'object') {
                 const lang = audioLanguage(item.languageCode || item.language || item.lang);
                 const codec = String(item.codec || item.audioCodec || item.mimeType || '');
-                return codec ? {lang, codec, source:'player-stats'} : null;
+                const channels = audioChannels(item.channels ?? item.channelCount);
+                return codec || channels ? {lang, codec, channels, source:'player-stats'} : null;
             } else data = String(data.audioCodec || data.audio_codec || '');
         }
         if (typeof data !== 'string' || !data) return null;
@@ -276,7 +319,8 @@
             || line.match(/\b(?:ec-3|eac3|mp4a\.\d+(?:\.\d+)?|ddplus|heaac|aac)\b/i)?.[0]
             || '';
         const lang = audioLanguage(line.match(/^([a-z]{2,3}(?:-[a-z0-9]+)*)\s*,/i)?.[1] || '');
-        return codec ? {lang, codec, source:'playback-stats'} : null;
+        const channels = audioChannels(line.match(/\bChannels?\s*:\s*([^,\r\n]+)/i)?.[1]);
+        return codec || channels ? {lang, codec, channels, source:'playback-stats'} : null;
     }
 
     function currentPlaybackAudio() {
@@ -297,18 +341,94 @@
         return null;
     }
 
-    function selectedAudioInfo() {
-        let track = null;
-        let selectedLabel = '';
+
+    // Selected audio entry in the player's Audio column, not the Subtitle
+    // column. The menu is often detached/hidden when playing, so retain the
+    // last checked choice within this watch page until navigation.
+    function isCheckedAudioRow(row) {
+        if (!row) return false;
+        const checked = el => el?.getAttribute?.('aria-checked') === 'true' ||
+            el?.getAttribute?.('aria-selected') === 'true' ||
+            el?.getAttribute?.('data-selected') === 'true' ||
+            /\bselected\b|\bactive\b|\bchecked\b/i.test(String(el?.className?.baseVal || el?.className || ''));
+        if (checked(row)) return true;
+        if (row.querySelector?.('[aria-checked="true"], [aria-selected="true"], [data-selected="true"], [class~="selected"], [data-uia*="checkmark"], svg[class*="check"], [class*="checkmark"]')) {
+            return true;
+        }
+        const label = row.textContent?.trim() || '';
+        return /^[✓✔☑]\s*/.test(label);
+    }
+
+    function activeCheckedAudioChoice() {
+        const candidates = [];
+        const seenColumns = new Set();
+        const add = el => {
+            if (el && !seenColumns.has(el)) {
+                seenColumns.add(el);
+                candidates.push(el);
+            }
+        };
+
+        // Known player audio-list wrappers, never the whole audio/subtitle
+        // controller that also contains checked subtitle entries.
         try {
-            const player = activePlayer()?.player;
-            track = player?.getAudioTrack?.() || player?.getCurrentAudioTrack?.() || null;
-            const tracks = player?.getAudioTrackList?.() || player?.getAudioTracks?.();
-            if ((!track || typeof track === 'string') && Array.isArray(tracks)) {
-                const byId = tracks.find(t => t && (t.id === track || t.trackId === track));
-                track = byId || tracks.find(t => t?.selected || t?.isSelected || t?.active) || null;
+            document.querySelectorAll([
+                '.audio-tracks', '.audio-subtitle-audio-list',
+                '[data-uia="audio-list"]', '[data-uia="audio-menu"]',
+                '[data-uia="audio-tracks"]', '[data-uia="audio-subtitle-audio-list"]',
+                '[class*="audio-tracks"]', '[class*="audio-subtitle-audio"]'
+            ].join(',')).forEach(add);
+        } catch (_) {}
+
+        // Other player revisions place two sibling columns below headings.
+        // Anchor to an exact Audio / เสียง heading, rejecting any ancestor
+        // containing the separate Subtitles / คำบรรยาย heading.
+        try {
+            const headings = document.querySelectorAll('h2,h3,h4,h5,h6,[role="heading"],strong,[class*="audio-subtitle-title"],[class*="audio-subtitle-header"],[data-uia*="audio-header"]');
+            for (const heading of headings) {
+                if (!/^(?:เสียง|audio)$/i.test(heading.textContent?.trim() || '')) continue;
+                let parent = heading.parentElement;
+                for (let depth = 0; parent && depth < 5; depth++, parent = parent.parentElement) {
+                    const h = parent.querySelectorAll?.('h2,h3,h4,h5,h6,[role="heading"],[class*="audio-subtitle-title"],[class*="audio-subtitle-header"]') || [];
+                    const hasSubtitleHeading = Array.from(h).some(x =>
+                        /^(?:คำบรรยาย|subtitles?)$/i.test(x.textContent?.trim() || ''));
+                    if (hasSubtitleHeading) break;
+                    const rows = parent.querySelectorAll?.('li,[role="option"],[role="radio"],[role="menuitemradio"],[data-uia="audio-item"],[data-uia="track"],[class*="audio-subtitle-item"]') || [];
+                    if (rows.length > 0) add(parent);
+                }
             }
         } catch (_) {}
+
+        for (const column of candidates) {
+            let rows = [];
+            try {
+                rows = Array.from(column.querySelectorAll(
+                    'li,[role="option"],[role="menuitemradio"],[role="radio"],[data-uia="audio-item"],[data-uia="track"],[data-uia="audio-subtitle-item"],[class*="audio-subtitle-item"]'));
+            } catch (_) {}
+            // UI markup can nest role-option inside li; prefer the outer row.
+            for (const row of rows) {
+                if (!isCheckedAudioRow(row)) continue;
+                const label = row.textContent?.replace(/^[✓✔☑]\s*/, '').trim() || '';
+                if (!label || label.length > 180 ||
+                    /^(?:เสียง|audio|คำบรรยาย|subtitles?)$/i.test(label)) continue;
+                // No string containing both column headings is a valid choice.
+                if (/(?:คำบรรยาย|subtitles?)/i.test(label)) continue;
+                const result = {
+                    label,
+                    is51: /\b5[.,]1\b|\(\s*5[.,]1\s*\)/i.test(label),
+                    source: 'checked-audio-menu'
+                };
+                lastCheckedAudioChoice = result;
+                return result;
+            }
+        }
+        return lastCheckedAudioChoice;
+    }
+
+    function selectedAudioInfo() {
+        const selection = currentAudioSelection();
+        const track = selection.track;
+        let selectedLabel = '';
         try {
             // Do not confuse currently selected SUBTITLE with the audio track.
             selectedLabel = document.querySelector([
@@ -325,7 +445,12 @@
             track?.lang, track?.locale, track?.displayName, track?.languageDescription,
             selectedLabel];
         const playback = currentPlaybackAudio();
-        const lang = playback?.lang || langFields.map(audioLanguage).find(Boolean) || 'und';
+        const checkedAudio = activeCheckedAudioChoice();
+        const menuLanguage = audioLanguage(checkedAudio?.label);
+        const selectedLanguage = menuLanguage && selection.lang &&
+            menuLanguage.split('-')[0] !== selection.lang.split('-')[0] ? menuLanguage : selection.lang;
+        const lang = selectedLanguage || menuLanguage
+            || langFields.map(audioLanguage).find(Boolean) || playback?.lang || 'und';
         const labels = [
             track?.codec, track?.audioCodec, track?.contentProfile,
             track?.profile, track?.format, track?.mimeType,
@@ -333,13 +458,27 @@
         ].filter(x => typeof x === 'string').join(' ');
         // The *playing* audio codec takes precedence over track labels because
         // a 5.1 menu entry may actually be HE-AAC 5.1, not Dolby Digital Plus.
-        const mediaCodecs = typeof playback?.codec === 'string' && playback.codec
+        const matchingPlayback = !playback?.lang || lang === 'und' ||
+            playback.lang.split('-')[0] === lang.split('-')[0];
+        const mediaCodecs = matchingPlayback && typeof playback?.codec === 'string' && playback.codec
             ? playback.codec : labels;
         const ddp = /(?:\bec-?3\b|\be-?ac-?3\b|ddplus|dolby digital plus)/i.test(mediaCodecs);
         const aac = /(?:\bmp4a\b|\bheaac\b|\baac\b)/i.test(mediaCodecs);
-        return {lang, codec: ddp ? 'eac3' : 'aac',
-            codecVerified: ddp || aac,
-            source: playback?.source || (track ? 'active-track' : selectedLabel ? 'audio-selector' : 'unknown')};
+        // Follow the confirmed selected 5.1 setting for the requested filename.
+        // Channels can be available without a codec field or an open audio menu.
+        // Keep independently reported playback codec separate from naming.
+        const channels = checkedAudio ? (checkedAudio.is51 ? 6 : 2)
+            : selection.channels ?? (matchingPlayback ? playback?.channels : null);
+        const codec = checkedAudio ? (checkedAudio.is51 ? 'eac3' : 'aac')
+            : channels === 6 ? 'eac3' : ddp ? 'eac3' : 'aac';
+        const measuredCodec = ddp ? 'eac3' : aac ? 'aac' : null;
+        return {lang, codec, channels,
+            codecVerified: measuredCodec === codec,
+            measuredCodec,
+            selectionConfirmed: Boolean(checkedAudio || channels),
+            channelLabel: channels === 6 ? '5.1' : channels === 8 ? '7.1' : channels ? 'stereo' : '',
+            source: checkedAudio?.source || (selection.channels ? 'active-track-channels'
+                : playback?.source || (track ? 'active-track' : selectedLabel ? 'audio-selector' : 'unknown'))};
     }
 
     function activeVideoMetadata() {
@@ -397,13 +536,16 @@
         else {
             // Preserve the edited name, but normalize any obsolete extension.
             const ext = selectedAudioInfo().codec;
-            filename.value = safeName(filename.value.replace(/\.(?:mp4|m4a|aac|eac3)$/i, '')) + '.' + ext;
+            let base = filename.value.replace(/\.(?:mp4|m4a|aac|eac3)$/i, '');
+            base = base.replace(/ - (?:eac3|aac) - track-/i, ' - ' + ext + ' - track-');
+            filename.value = safeName(base) + '.' + ext;
         }
         if (audioSummary) {
             const info = selectedAudioInfo();
             audioSummary.textContent = 'Audio: ' + info.lang + ' · ' + info.codec.toUpperCase() +
-                (info.codecVerified ? ' (identified)' : ' (codec unverified)') +
-                ' · file may be a container/DRM media';
+                (info.channelLabel ? ' · ' + info.channelLabel + ' selected' : '') +
+                (info.measuredCodec && info.measuredCodec !== info.codec
+                    ? ' · playback codec: ' + info.measuredCodec.toUpperCase() : '');
         }
     }
 
@@ -418,6 +560,8 @@
         probeQueue.length = 0;
         failedProbes = 0;
         manualChoiceUrl = null;
+        lastCheckedAudioChoice = null;
+        lastAudioTrackKey = null;
         if (panel) panel.remove();
         panel = choices = filename = status = summary = downloadButton = undefined;
         audioSummary = null;
@@ -492,7 +636,7 @@
         header.title = 'Drag this header to move the downloader';
         const heading = document.createElement('strong');
         panelHeading = heading;
-        heading.textContent = 'NF · Media downloader v2.7';
+        heading.textContent = 'NF · Media downloader v2.9';
         header.appendChild(heading);
         const headerActions = document.createElement('div');
         headerActions.className = 'header-actions';

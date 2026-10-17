@@ -1,33 +1,38 @@
-# NF Named Download — v2.10
+# NF Named Download — v2.11
 
-v2.10 fixes missing media-file capture while preserving the selected 5.1 / `.eac3` filename behavior from v2.9.
+Restores the URL targeting from the user's working v2.3 reference. The `cleanLink` function is identical to that supplied reference.
 
-## Capture fixes
+## Accepted requests
 
-- Observe page `fetch` requests, including URL and Request inputs, and XHR URLs/redirects.
-- Passively inspect bounded URL-bearing messages sent to/from native Workers, SharedWorkers, and MessageChannel ports. Worker code, source URLs, message contents, transfer lists, response bodies and return values remain unchanged.
-- Keep resource timing as an additional capture source.
-- Recognize nonzero URL ranges such as `/range/49152-65535` and full CDN URLs without a range path. Preserve signed query strings.
-- Deduplicate resource entries across watch-page navigation instead of discarding new requests that started before a polling callback noticed the navigation.
-- Install API/message hooks only on NF pages. Media buffers and property getters in messages are not inspected.
+- HTTPS URLs on a subdomain of `nflxvideo.net`.
+- The pathname must contain an initial range segment such as `/range/0-4095` or `/range/0-65535` (including the encoded slash form supported by the reference).
+- Remove that initial-range segment to obtain the download URL. Preserve signed query parameters.
 
-## Update
+Direct CDN URLs without an initial range and ranges starting after byte zero are rejected. They are not size-probed and cannot become the smallest-file default.
+
+Worker/SharedWorker/MessageChannel constructors, postMessage methods, and message payload scanning added in v2.10 have been removed. A URL merely mentioned in a manifest/catalog message is not an observed media request.
+
+Resource timing and actual page fetch/XHR requests all use this same strict initial-range matcher. Existing bounded resource deduplication across SPA navigation remains.
+
+## Preserved behavior
+
+- Smallest measured qualifying file by default; explicit dropdown selection controls Copy Link and Download selected.
+- Active title, episode, audio language, selected 5.1 `.eac3` filename convention, and editable names.
+- Requested `gm/nfaudio` destination, progress/errors, minimize/restore, dragging, remembered position and fullscreen attachment.
+
+## Install
 
 https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 
-**Fully reload the watch page after updating.** The heading must show **NF · Media downloader v2.10**. This allows the capture hooks to attach when the player and its workers are created.
-
-Captured files populate the dropdown after size checks. The smallest measured file remains the default; a manual dropdown selection is used by Copy Link and Download selected. Destination, download feedback, minimize/restore, dragging and remembered position are preserved.
-
-The selected 5.1 naming rule remains unchanged. A diagnostic containing `mp4a.40.5 (ddplus51hq)` is not used to undo the requested `.eac3` filename.
+Update the existing script, reload the watch page, and confirm **NF · Media downloader v2.11**. The player must make an initial-range request before a file can be listed.
 
 ## Checks
 
 ```sh
-python run_nf_named_download_v2_10_tests.py
-python test_nf_named_download_v2_10_browser.py
+python run_nf_named_download_v2_11_tests.py
+python test_nf_named_download_v2_11_browser.py
 ```
 
-The browser check requires Python Playwright with Chromium installed. It uses local simulated endpoints and real browser fetch, XHR, Workers and MessageChannel APIs with page resource timing deliberately disabled. It verifies capture, native response/return-value preservation, file selection, `.eac3` naming, and SPA resource deduplication. No signed media URLs, cookies or media samples are included in these fixtures.
+The optional browser check requires Python Playwright with Chromium installed. It uses local simulated endpoints and real browser fetch/XHR/Worker APIs. It verifies that qualifying requests are accepted, wrong/direct/nonzero/catalog-only URLs never reach HEAD probing, native APIs and response bytes remain unchanged, signed query strings are preserved, and file selection/naming survive navigation.
 
-Real NF traffic still needs verification after installing this update. A worker request that never exposes its URL through any observed page API, timing entry or message cannot be recovered by these passive hooks. The script downloads the selected CDN response unchanged; it does not demux, decrypt or transcode it.
+These checks do not claim a live transfer from the user's NF session. The script saves the selected response unchanged; no media conversion or decryption is performed.

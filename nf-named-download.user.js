@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @updateURL    https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 // @downloadURL  https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
-// @version      2.10
+// @version      2.11
 // @description  Select media (smallest by default); use active NF title, audio language and codec for filenames.
 // @match        *://*/*
 // @grant        unsafeWindow
@@ -25,7 +25,7 @@
     // Relative to the browser's download folder. Locally, gm/nfaudio points to
     // /datadisk/daily/gm/nfaudio so other browser downloads are unaffected.
     const DOWNLOAD_FOLDER = 'gm/nfaudio';
-    // NF media requests made in a worker may not appear in page timing.
+    // Show the panel on NF even before a qualifying initial-range request appears.
     const isNFPage = /(^|\.)netflix\.com$/i.test(location.hostname);
     const links = new Map();
     const seen = new Set();
@@ -74,7 +74,7 @@
         if (!panel) return;
         panelBody.hidden = minimized;
         panel.style.width = minimized ? '240px' : '430px';
-        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v2.10';
+        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v2.11';
         minimizeButton.textContent = minimized ? '+' : '−';
         minimizeButton.title = minimized ? 'Restore downloader' : 'Minimize downloader';
         minimizeButton.setAttribute('aria-label', minimizeButton.title);
@@ -198,12 +198,12 @@
         if (downloadButton) downloadButton.disabled = downloading || !selected;
     }
 
-    function cleanLink(raw, allowDirect = false) {
+    function cleanLink(raw) {
         try {
             const url = new URL(raw, location.href);
             if (url.protocol !== 'https:' || !url.hostname.endsWith('.nflxvideo.net')) return null;
-            const path = url.pathname.replace(/(?:\/|%2f)range(?:\/|%2f)\d+-\d+(?=\/|%2f|$)/i, '');
-            if (path === url.pathname && !allowDirect) return null;
+            const path = url.pathname.replace(/(?:\/|%2f)range(?:\/|%2f)0-\d+(?=\/|%2f|$)/i, '');
+            if (path === url.pathname) return null;
             // Keep signed query parameters untouched. Only remove the range path.
             url.pathname = path || '/';
             return url.href;
@@ -635,7 +635,7 @@
         header.title = 'Drag this header to move the downloader';
         const heading = document.createElement('strong');
         panelHeading = heading;
-        heading.textContent = 'NF · Media downloader v2.10';
+        heading.textContent = 'NF · Media downloader v2.11';
         header.appendChild(heading);
         const headerActions = document.createElement('div');
         headerActions.className = 'header-actions';
@@ -819,9 +819,9 @@
         updateSummary();
     }
 
-    function capture(raw, allowDirect = false) {
+    function capture(raw) {
         resetOnNavigation();
-        const link = cleanLink(raw, allowDirect);
+        const link = cleanLink(raw);
         if (!link || seen.has(link)) return;
         seen.add(link);
         probeQueue.push({ url: link, number: seen.size, generation });
@@ -831,16 +831,16 @@
 
     function installRequestCapture() {
         const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-        const report = (value, allowDirect = true) => {
+        const report = value => {
             try {
                 const url = typeof value === 'string' ? value : value?.url || value?.href;
-                if (typeof url === 'string') capture(url, allowDirect);
+                if (typeof url === 'string') capture(url);
             } catch (_) { /* Observing a request must never interrupt playback. */ }
         };
 
-        // Resource timing for a page cannot see requests made inside every
-        // worker. Observe request APIs as well, without changing their inputs,
-        // response bodies, return values, or exceptions.
+        // Observe actual page requests as well as resource timing. Every source
+        // must pass the same strict initial-range filter from the reference.
+        // Inputs, response bodies, return values and exceptions are unchanged.
         try {
             const original = page.fetch;
             if (typeof original === 'function') {
@@ -867,82 +867,20 @@
                 };
             }
         } catch (_) {}
-
-        // URLs can travel between a player and its workers over messages.
-        // Scan only bounded, plain message data; skip media buffers, getters,
-        // and non-media hosts. Worker scripts and URLs remain untouched.
-        const inspectMessage = data => {
-            let budget = 1000;
-            const visited = new WeakSet();
-            const visit = (value, depth) => {
-                if (--budget < 0 || depth > 7 || value == null) return;
-                if (typeof value === 'string') {
-                    if (value.length > 2 * 1024 * 1024) return;
-                    const decoded = value.replace(/\\\//g, '/').replace(/\\u0026/gi, '&');
-                    const urls = decoded.match(/https?:\/\/[^\s/"'<>\\]*\.nflxvideo\.net\/[^\s"'<>\\]*/gi) || [];
-                    for (const url of urls.slice(0, 100)) report(url);
-                    return;
-                }
-                if (typeof value !== 'object' || visited.has(value) || ArrayBuffer.isView(value)) return;
-                const type = Object.prototype.toString.call(value);
-                if (type !== '[object Object]' && type !== '[object Array]') return;
-                visited.add(value);
-                for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-                    if (budget <= 0) break;
-                    if (descriptor.enumerable && 'value' in descriptor) visit(descriptor.value, depth + 1);
-                }
-            };
-            try { visit(data, 0); } catch (_) {}
-        };
-        const attached = new WeakSet();
-        const observe = endpoint => {
-            try {
-                if (!endpoint || attached.has(endpoint)) return;
-                attached.add(endpoint);
-                endpoint.addEventListener('message', event => inspectMessage(event.data));
-            } catch (_) {}
-        };
-        for (const Constructor of [page.Worker, page.MessagePort]) {
-            try {
-                const prototype = Constructor?.prototype;
-                const original = prototype?.postMessage;
-                if (typeof original !== 'function') continue;
-                prototype.postMessage = function (...args) {
-                    observe(this);
-                    inspectMessage(args[0]);
-                    return Reflect.apply(original, this, args);
-                };
-            } catch (_) {}
-        }
-        for (const name of ['Worker', 'SharedWorker', 'MessageChannel']) {
-            try {
-                if (typeof page[name] !== 'function') continue;
-                page[name] = new Proxy(page[name], {
-                    construct(target, args, newTarget) {
-                        const endpoint = Reflect.construct(target, args, newTarget);
-                        if (name === 'MessageChannel') {
-                            observe(endpoint.port1);
-                            observe(endpoint.port2);
-                        } else observe(endpoint.port || endpoint);
-                        return endpoint;
-                    }
-                });
-            } catch (_) {}
-        }
     }
 
     if (isNFPage) installRequestCapture();
 
     // Poll as well as observe: some browsers miss buffered resource entries.
     function captureResource(entry) {
-        if (!cleanLink(entry.name, true)) return;
+        if (!cleanLink(entry.name)) return;
         const key = `${entry.startTime}|${entry.name}`;
         if (seenResources.has(key)) return;
         seenResources.add(key);
         if (seenResources.size > 4096) seenResources.delete(seenResources.values().next().value);
         // Deduplicate across SPA changes instead of dropping a new request
         // merely because it started before the polling callback noticed a URL change.
-        capture(entry.name, true);
+        capture(entry.name);
     }
     function scanResources() {
         try {

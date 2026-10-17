@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @updateURL    https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 // @downloadURL  https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
-// @version      2.11
+// @version      3
 // @description  Select media (smallest by default); use active NF title, audio language and codec for filenames.
 // @match        *://*/*
 // @grant        unsafeWindow
@@ -74,7 +74,7 @@
         if (!panel) return;
         panelBody.hidden = minimized;
         panel.style.width = minimized ? '240px' : '430px';
-        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v2.11';
+        panelHeading.textContent = minimized ? 'NF' : 'NF · Media downloader v3';
         minimizeButton.textContent = minimized ? '+' : '−';
         minimizeButton.title = minimized ? 'Restore downloader' : 'Minimize downloader';
         minimizeButton.setAttribute('aria-label', minimizeButton.title);
@@ -635,7 +635,7 @@
         header.title = 'Drag this header to move the downloader';
         const heading = document.createElement('strong');
         panelHeading = heading;
-        heading.textContent = 'NF · Media downloader v2.11';
+        heading.textContent = 'NF · Media downloader v3';
         header.appendChild(heading);
         const headerActions = document.createElement('div');
         headerActions.className = 'header-actions';

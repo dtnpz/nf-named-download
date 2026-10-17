@@ -3,8 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const src = fs.readFileSync('nf-named-download.user.js','utf8');
-new vm.Script(src, {filename:'nf-named-download-v2.11.user.js'});
-assert.match(src, /@version\s+2\.11/);
+new vm.Script(src, {filename:'nf-named-download-v3.user.js'});
+assert.match(src, /@version\s+3/);
 assert.match(src, /@grant\s+unsafeWindow/);
 assert.ok(src.includes("downloadButton.disabled = downloading || !selected"));
 assert.ok(src.includes("choices.value = chosen ? chosen[0] : ''"));
@@ -250,10 +250,10 @@ function simulateDownload(codec,name='custom-video.mp4') {
  assert.match(ctx.audioSummary.textContent,/5\.1 selected/i);
  assert.doesNotMatch(ctx.audioSummary.textContent,/assumed|unverified/i);
 }
-assert.match(src, /NF · Media downloader v2\.11/);
+assert.match(src, /NF · Media downloader v3/);
 assert.ok(src.includes('lastCheckedAudioChoice = null;'),'Reset cached menu on navigation');
 
-console.log('PASS: v2.11 metadata, title/episode, current audio language, explicit DD+, HE-AAC 5.1, unknown-language fallback, editable filename, forced audio extensions, selected download.');
+console.log('PASS: v3 metadata, title/episode, current audio language, explicit DD+, HE-AAC 5.1, unknown-language fallback, editable filename, forced audio extensions, selected download.');
 
 // Missing menu/codec data: use selected channel metadata directly.
 for (const field of ['channels','channelCount','numChannels','audioChannels','channelLayout']) {
@@ -282,7 +282,7 @@ for (const field of ['channels','channelCount','numChannels','audioChannels','ch
  assert.equal(vm.runInContext('selectedAudioInfo().lang',ctx),'th');
  assert.equal(vm.runInContext('selectedAudioInfo().codec',ctx),'aac');
 }
-console.log('PASS: v2.11 player channel fields, selected track IDs, missing codec/menu, and stale selection invalidation.');
+console.log('PASS: v3 player channel fields, selected track IDs, missing codec/menu, and stale selection invalidation.');
 {
  const ctx=mock({track:{id:'old-thai',languageCode:'th',channels:2},
   menuItems:['จีนกลาง (ผู้ตงฮั่ว) [ต้นฉบับ] (5.1)']});
@@ -314,4 +314,4 @@ const captureCode=between('    function cleanLink(raw)', '    function text(sele
 assert.ok(!src.includes('allowDirect'));
 assert.ok(!src.includes('inspectMessage'));
 assert.ok(!src.includes('new Proxy(page[name]'));
-console.log('PASS: v2.11 initial-range-only targeting, signed-query preservation, rejected direct/nonzero URLs and removal of arbitrary message capture.');
+console.log('PASS: v3 initial-range-only targeting, signed-query preservation, rejected direct/nonzero URLs and removal of arbitrary message capture.');

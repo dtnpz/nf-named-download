@@ -1,6 +1,6 @@
-# NF Named Download — v2.11
+# NF Named Download — v3
 
-Restores the URL targeting from the user's working v2.3 reference. The `cleanLink` function is identical to that supplied reference.
+Version 3 keeps the URL targeting from the user's working v2.3 reference. The `cleanLink` function is identical to that supplied reference.
 
 ## Accepted requests
 
@@ -24,7 +24,7 @@ Resource timing and actual page fetch/XHR requests all use this same strict init
 
 https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 
-Update the existing script, reload the watch page, and confirm **NF · Media downloader v2.11**. The player must make an initial-range request before a file can be listed.
+Update the existing script, reload the watch page, and confirm **NF · Media downloader v3**. The player must make an initial-range request before a file can be listed.
 
 ## Checks
 

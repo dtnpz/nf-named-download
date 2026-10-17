@@ -1,35 +1,33 @@
-# NF Named Download — v2.9
+# NF Named Download — v2.10
 
-The requested audio filename now follows the confirmed selected 5.1 track even when the audio menu is closed or the player exposes channels without a codec field.
+v2.10 fixes missing media-file capture while preserving the selected 5.1 / `.eac3` filename behavior from v2.9.
 
-## Changes
+## Capture fixes
 
-- Read the current player's `channels`, `channelCount`, `numChannels`, `audioChannels`, channel layout, and selected track label.
-- Resolve selected audio IDs, including numeric IDs, against the player's audio-track list.
-- A selected 5.1 track produces the requested `eac3` token and `.eac3` extension. A checked stereo menu selection produces `aac` / `.aac`.
-- Audio-menu detection stays scoped to the audio column and supports additional audio-row markup. A checked subtitle cannot determine audio naming.
-- Clear cached menu information when the active audio ID, language, or channel count changes. Ignore playback stats from a different audio language.
-- Show `5.1 selected` instead of the previous `assumed` / `codec unverified` wording. Independently reported playback codec remains available as a separate diagnostic when it differs from the requested output label.
-- Preserve manual filenames, selected CDN links, size comparisons, download feedback, minimize/drag, and the `gm/nfaudio` destination.
+- Observe page `fetch` requests, including URL and Request inputs, and XHR URLs/redirects.
+- Passively inspect bounded URL-bearing messages sent to/from native Workers, SharedWorkers, and MessageChannel ports. Worker code, source URLs, message contents, transfer lists, response bodies and return values remain unchanged.
+- Keep resource timing as an additional capture source.
+- Recognize nonzero URL ranges such as `/range/49152-65535` and full CDN URLs without a range path. Preserve signed query strings.
+- Deduplicate resource entries across watch-page navigation instead of discarding new requests that started before a polling callback noticed the navigation.
+- Install API/message hooks only on NF pages. Media buffers and property getters in messages are not inspected.
 
-Example:
-
-```text
-Title - S01E01 - zh-cn - eac3 - track-02.eac3
-```
-
-## Install
-
-Update the existing Tampermonkey script using:
+## Update
 
 https://raw.githubusercontent.com/dtnpz/nf-named-download/main/nf-named-download.user.js
 
-Reload the watch page and check that the panel displays **NF · Media downloader v2.9**.
+**Fully reload the watch page after updating.** The heading must show **NF · Media downloader v2.10**. This allows the capture hooks to attach when the player and its workers are created.
 
-## Verification and scope
+Captured files populate the dropdown after size checks. The smallest measured file remains the default; a manual dropdown selection is used by Copy Link and Download selected. Destination, download feedback, minimize/restore, dragging and remembered position are preserved.
 
-Run `node --check nf-named-download.user.js` and `node test_nf_named_download_v2_9.js`.
+The selected 5.1 naming rule remains unchanged. A diagnostic containing `mp4a.40.5 (ddplus51hq)` is not used to undo the requested `.eac3` filename.
 
-Focused regression coverage includes selected 5.1 with no codec/menu, alternate channel fields, numeric selected-track IDs, audio changes with a closed menu, subtitle isolation, editable filenames, selected downloads while other probes run, and separate playback-codec diagnostics.
+## Checks
 
-This change corrects selection detection and the requested filename convention. Downloaded CDN bytes are unchanged. It does not establish that every selected response is elementary E-AC-3, nor does it add demuxing, decryption, or transcoding.
+```sh
+python run_nf_named_download_v2_10_tests.py
+python test_nf_named_download_v2_10_browser.py
+```
+
+The browser check requires Python Playwright with Chromium installed. It uses local simulated endpoints and real browser fetch, XHR, Workers and MessageChannel APIs with page resource timing deliberately disabled. It verifies capture, native response/return-value preservation, file selection, `.eac3` naming, and SPA resource deduplication. No signed media URLs, cookies or media samples are included in these fixtures.
+
+Real NF traffic still needs verification after installing this update. A worker request that never exposes its URL through any observed page API, timing entry or message cannot be recovered by these passive hooks. The script downloads the selected CDN response unchanged; it does not demux, decrypt or transcode it.
